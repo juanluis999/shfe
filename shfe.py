@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 dates = pd.date_range(start='2026-04-01', end='2026-04-28', freq='D')
 thread_local = threading.local()                     # Create a 'thread-local' object to hold data specific to each thread.
 headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
-max_workers = 5
+max_workers = 10
 
 def get_session():                                   # Define a function to get a session object for the current thread.
     if not hasattr(thread_local, "session"):         # If "thread_local" doesn't yet have a "session" attribute...
