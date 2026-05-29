@@ -3,6 +3,7 @@ import requests
 import threading
 import time
 import logging
+import os
 from io import StringIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -32,13 +33,75 @@ def fetch_prices_data(date):
     response = get_session().get(url)
     logging.info("Price data fetched for %s: %d", date.strftime('%Y-%m-%d'), response.status_code)
 
-def fetch_stocks_data(date):
+def fetch_stocks_data(date): # Fetch stocks for a give date and deliver a DataFrame
     url = f"https://www.shfe.cn/data/tradedata/future/stockdata/weeklystock_{date.strftime('%Y%m%d')}/EN/all.html"
-    response = get_session().get(url)
-    logging.info("Stock data fetched for %s: %d", date.strftime('%Y-%m-%d'), response.status_code)
+    try:
+        response = get_session().get(url, timeout=10)
+        if response.status_code == 404:
+            logging.warning("Stocks data not available for %s [404]", date.strftime('%Y-%m-%d')) # or logging.info
+            return pd.DataFrame()
+        response.raise_for_status()
+        
+        data = pd.read_html(StringIO(response.text)) # Read all tables from the HTML response into a list of DataFrames
+        
+        df_stocks = pd.DataFrame() # Create an empty DataFrame to store the concatenated results
+        for df in data:
+            if isinstance(df.columns, pd.MultiIndex): # Flatten the df columns if they are MultiIndex
+                df.columns = [col[0] if col[0] == col [1] else f"{col[0]} ({col[1]})" for col in df.columns]
+            
+            if "Change" in df.columns: # If 'Change' column exists, insert sufix from previous column: Change (Last Week)
+                columns = df.columns.to_list()
+                i = columns.index("Change")
+                df.columns.values[i] = f"Change {columns[i-1][columns[i-1].find('('):columns[i-1].find(')')+1]}"
+            
+            renames= {
+                "Theoretical Available Capacity (Last week)": "Storage Capacity (Last week)",
+                "Theoretical Available Capacity (This Week)": "Storage Capacity (This Week)",
+                "Theoretical Available Capacity (Change)": "Storage Capacity (Change)",
+                "Storage of last week": "Previous Week (Delivery-able)",
+                "Storage of this week": "This Week (Delivery-able)",
+                "Storage Change": "Change (Delivery-able)",
+                "Storage of last week (Delivery-able)": "Previous Week (Delivery-able)",
+                "Storage of last week (On Warrant)": "Previous Week (On Warrant)",
+                "Storage of this week (Delivery-able)": "This Week (Delivery-able)",
+                "Storage of this week (On Warrant)": "This Week (On Warrant)",
+                "Storage Change (Delivery-able)": "Change (Delivery-able)",
+                "Storage Change (On Warrant)": "Change (On Warrant)",
+                "Factory Warehouse" : "Warehouse",
+                "Depot" : "Warehouse",
+                "Grade" : "Crude",
+                "Factory Depot" : "Warehouse"}
+            df.rename(columns=renames, inplace=True) # Rename columns as per the 'renames' dictionary, if they exist.
+            
+            unit_of_measure = df.iloc[0,-1] # Get the last column of the first row which may contain the "Unit: " information
+            if isinstance(unit_of_measure, str) and "Unit：" in unit_of_measure: # If the "Unit: " measurement is provided
+                unit_of_measure = unit_of_measure.split("Unit：")[1].strip() # Extract the unit of measure
+                commodity_name = df.iloc[0,0] # Get the first column of the first row which may contain the commodity name
+                df.insert(0, "Commodity", f"{commodity_name} ({unit_of_measure})") #...Create a 'Commodity' column by extracting it from the first row's first column
+                #df.insert(1, "Unit", unit_of_measure) #...Create a 'Unit' column by extracting it from the first row's last column
+                df.drop(df.index[0], inplace=True) # Drop the first row which is now redundant after extracting the 'Unit' and 'Commodity' info.
+                df.replace("--", pd.NA, inplace=True) #...Replace any occurrence of "--" with NaN
+            
+            # Convert columns that contain numeric data stored as strings to numeric types
+            df = df.apply(lambda col: pd.to_numeric(col, errors='coerce') if col.dropna().astype(str).str.fullmatch(r"-?\d+(\.\d+)?").all() else col)
+            
+            if df.shape[1] > 1: # If the DataFrame has more than one column...
+                df_stocks = pd.concat([df_stocks, df], ignore_index=True) # Concatenate the cleaned DataFrame to the main 'DF'
+            
+        os.makedirs("stocks", exist_ok=True) # If doesn't exist, create the "stocks" directory
+        df_stocks.to_csv(f"stocks/{date.strftime('%Y.%m.%d')} SHFE stocks.csv", index=False)
+        logging.info("SHFE stocks data fetched and saved for %s: %d rows", date.strftime('%d-%m-%Y'), len(df_stocks))
+        return df_stocks
+
+    except requests.RequestException as network_error:
+        logging.error("Network error for %s [%s]", date.strftime('%d-%m-%Y'), network_error)
+        return pd.DataFrame({"Stock_Error": [str(network_error)]})
+    except Exception as processing_error:
+        logging.error("Error processing stocks data for %s [%s]", date.strftime('%d-%m-%Y'), processing_error)
+        return pd.DataFrame({"Stock_Error": [str(processing_error)]})
 
 def fetch_shfe_data(date):
-    fetch_prices_data(date)
+    #fetch_prices_data(date)
     fetch_stocks_data(date)
 
 def main():
@@ -48,6 +111,6 @@ def main():
         futures = [executor.submit(fetch_shfe_data, date) for date in trading_days] # 'futures' object store the threads and start them.
         for future in as_completed(futures):
             future.result()  # Show the result of each thread once completed.
-    logging.info("Data fetch completed in %.2f seconds.", time.time() - start_time)
+    logging.info("Data fetch completed in %.2f seconds. JL 2026", time.time() - start_time)
 if __name__ == "__main__":
     main()
