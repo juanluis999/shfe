@@ -1,5 +1,7 @@
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 import threading
 import time
 import logging
@@ -8,7 +10,7 @@ from io import StringIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 os.makedirs("stocks", exist_ok=True)                    # If doesn't exist, create the "stocks" directory
-trading_days = pd.bdate_range(start='2026-05-01', end='2026-06-01')
+trading_days = pd.bdate_range(start='2026-01-01', end='2026-06-01')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 request_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
 thread_local = threading.local()                        # Create a 'thread-local' object to hold data specific to each thread.
@@ -17,13 +19,12 @@ def get_session() -> requests.Session:                  # Get a session object a
     if not hasattr(thread_local, "session"):            # If "thread_local" doesn't yet have a 'session' object
         session = requests.Session()                    # 'session' object
         session.headers.update(request_headers)         # Assign the 'request_headers' to 'session'
-        retries = requests.adapters.Retry(              # retry strategy
-            total=3,
+        retries = Retry(total=3,                        # retry strategy
             backoff_factor=0.5,                         # Waiting time growth factor between retries: 0.5,1,2,4...
             status_forcelist=[429, 500, 502, 503, 504], # HTTP status codes that should trigger retries
             allowed_methods=["HEAD", "GET", "OPTIONS"], # HTTP methods that should trigger retries
             raise_on_status=False)                      # Don't raise exeptions. We'll handle them manually.
-        adapter = requests.adapters.HTTPAdapter(max_retries=retries) # 'adapter' object that will manage retries
+        adapter = HTTPAdapter(max_retries=retries) # 'adapter' object that will manage retries
         session.mount("https://", adapter)              # Mount the 'adapter' to the 'session'
         session.mount("http://", adapter)
         thread_local.session = session                  # Assign the 'session' object to 'thread_local'
@@ -34,12 +35,12 @@ def fetch_prices_data(date):
     response = get_session().get(url)
     logging.info("Price data fetched for %s: %d", date.strftime('%Y-%m-%d'), response.status_code)
 
-def fetch_stocks_data(date): # Fetch stocks for a give date and deliver a DataFrame
+def fetch_stocks_data(date) -> pd.DataFrame: # Fetch stocks for a give date and deliver a DataFrame
     url = f"https://www.shfe.cn/data/tradedata/future/stockdata/weeklystock_{date.strftime('%Y%m%d')}/EN/all.html"
     try:
         response = get_session().get(url, timeout=10)
         if response.status_code == 404:
-            logging.warning("Stocks data not available for %s [404]", date.strftime('%Y-%m-%d')) # or logging.info
+            logging.info("Stocks data not available for %s [404]", date.strftime('%Y-%m-%d'))
             return pd.DataFrame()
         response.raise_for_status()
         
@@ -48,15 +49,10 @@ def fetch_stocks_data(date): # Fetch stocks for a give date and deliver a DataFr
         cleaned_dfs = []
         notes = []
         for df in raw_data:
-            if isinstance(df.columns, pd.MultiIndex): # Flatten the df columns if they are MultiIndex
+            # Flatten the df columns if they are MultiIndex, then rename columns that match the Dictionary
+            if isinstance(df.columns, pd.MultiIndex):
                 df.columns = [col[0] if col[0] == col [1] else f"{col[0]} ({col[1]})" for col in df.columns]
-            
-            if "Change" in df.columns: # If 'Change' column exists, insert sufix from previous column: Change (Last Week)
-                columns = df.columns.to_list()
-                i = columns.index("Change")
-                df.columns.values[i] = f"Change {columns[i-1][columns[i-1].find('('):columns[i-1].find(')')+1]}"
-            
-            renames= {
+            renames= {"Grade" : "Crude",
                 "Theoretical Available Capacity (Last week)": "Storage Capacity (Last week)",
                 "Theoretical Available Capacity (This Week)": "Storage Capacity (This Week)",
                 "Theoretical Available Capacity (Change)": "Storage Capacity (Change)",
@@ -71,26 +67,33 @@ def fetch_stocks_data(date): # Fetch stocks for a give date and deliver a DataFr
                 "Storage Change (On Warrant)": "Change (On Warrant)",
                 "Factory Warehouse" : "Warehouse",
                 "Depot" : "Warehouse",
-                "Grade" : "Crude",
                 "Factory Depot" : "Warehouse"}
-            df.rename(columns=renames, inplace=True) # Rename columns as per the 'renames' dictionary, if they exist.
+            df.rename(columns=renames, inplace=True)
             
-            unit_of_measure = df.iat[0,-1] # Get the last column of the first row which may contain the "Unit: " information
-            if isinstance(unit_of_measure, str) and "Unit：" in unit_of_measure: # If the "Unit: " measurement is provided
-                unit_of_measure = unit_of_measure.split("Unit：")[1].strip() # Extract the unit of measure
-                commodity_name = df.iat[0,0] # Get the first column of the first row which may contain the commodity name
-                df.insert(0, "Commodity", commodity_name) #...Create a 'Commodity' column by extracting it from the first row's first column
-                df.insert(1, "Unit", unit_of_measure) #...Create a 'Unit' column by extracting it from the first row's last column
-                df.drop(df.index[0], inplace=True) # Drop the first row which is now redundant after extracting the 'Unit' and 'Commodity' info.
-                df.replace("--", pd.NA, inplace=True) #...Replace any occurrence of "--" with NaN
+            # Extract the unit_of_measure and commodity_name from the first row, if provided
+            unit_of_measure = df.iat[0,-1]
+            if isinstance(unit_of_measure, str) and "Unit：" in unit_of_measure: # If the "Unit: " exists
+                unit_of_measure = unit_of_measure.split("Unit：")[1].strip()
+                commodity_name = df.iat[0,0]
+                df.insert(0, "Commodity", commodity_name)       # Create a 'Commodity' column
+                df.insert(1, "Unit", unit_of_measure)           # Create a 'Unit' column
+                df.drop(df.index[0], inplace=True)              # Drop the first row
+                df.replace("--", pd.NA, inplace=True)           # Replace any occurrence of "--" with NaN
             
+            columns = df.columns.to_list()
             # Convert columns that contain numeric data stored as strings to numeric types
-            #df = df.apply(lambda col: pd.to_numeric(col, errors='coerce') if col.dropna().astype(str).str.fullmatch(r"-?\d+(\.\d+)?").all() else col)
-            for column in df.columns:
-                if df[column].dropna().astype(str).str.fullmatch(r"-?\d+(\.\d+)?").all(): # If all non-null values in the column are numeric
-                    df[column] = pd.to_numeric(df[column], errors='coerce') # Convert the column to a numeric type, coercing any non-convertible values to NaN
+            for col in columns:
+                if df[col].dropna().astype(str).str.fullmatch(r"-?\d+(\.\d+)?").all():  # If all values are numeric
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
             
-            if 'Unit : (WGHTUNIT)' not in df.columns:
+            # If 'Change' column exists, insert sufix from the previous column i.e. "Change (Last Week)"
+            if "Change" in columns:
+                i = columns.index("Change")
+                df.columns.values[i] = f"Change {columns[i-1][columns[i-1].find('('):columns[i-1].find(')')+1]}"            
+
+            # Append the df to 'cleaned_dfs' if it doesn't contain the especial "Expiring Warrants" table
+            # 'Unit : (WGHTUNIT)' identifyes the "Expiring Warrants" table, which is saved separately with metadata
+            if 'Unit : (WGHTUNIT)' not in columns:
                 cleaned_dfs.append(df) if df.shape[1] > 1 else notes.append(df)
             else:
                 note = notes[-1].to_string(index=False, header=False).strip()
@@ -100,6 +103,7 @@ def fetch_stocks_data(date): # Fetch stocks for a give date and deliver a DataFr
                     df.to_csv(f, index=False)
                 logging.info("Amount of expiring standard warrants data fetched and saved for %s: %d rows", date.strftime('%d-%m-%Y'), len(df))
 
+        # Concatenate all cleaned_dfs into a single DataFrame and save it to a CSV file with notes as metadata
         df_stocks = pd.concat(cleaned_dfs, ignore_index=True)
         note = "\n".join(f'"# {df.to_string(index=False, header=False).strip()}"' for df in notes[0:2])
         with open(f"stocks/{date.strftime('%Y.%m.%d')} SHFE stocks.csv", 'w', newline='', encoding='utf-8-sig') as f:
