@@ -7,7 +7,8 @@ import os
 from io import StringIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-trading_days = pd.bdate_range(start='2026-04-01', end='2026-04-28')
+os.makedirs("stocks", exist_ok=True)                    # If doesn't exist, create the "stocks" directory
+trading_days = pd.bdate_range(start='2026-05-01', end='2026-06-01')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 request_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
 thread_local = threading.local()                        # Create a 'thread-local' object to hold data specific to each thread.
@@ -42,10 +43,11 @@ def fetch_stocks_data(date): # Fetch stocks for a give date and deliver a DataFr
             return pd.DataFrame()
         response.raise_for_status()
         
-        data = pd.read_html(StringIO(response.text)) # Read all tables from the HTML response into a list of DataFrames
+        raw_data = pd.read_html(StringIO(response.text)) # Read all tables from the HTML response into a list of DataFrames
         
-        df_stocks = pd.DataFrame() # Create an empty DataFrame to store the concatenated results
-        for df in data:
+        cleaned_dfs = []
+        notes = []
+        for df in raw_data:
             if isinstance(df.columns, pd.MultiIndex): # Flatten the df columns if they are MultiIndex
                 df.columns = [col[0] if col[0] == col [1] else f"{col[0]} ({col[1]})" for col in df.columns]
             
@@ -73,23 +75,30 @@ def fetch_stocks_data(date): # Fetch stocks for a give date and deliver a DataFr
                 "Factory Depot" : "Warehouse"}
             df.rename(columns=renames, inplace=True) # Rename columns as per the 'renames' dictionary, if they exist.
             
-            unit_of_measure = df.iloc[0,-1] # Get the last column of the first row which may contain the "Unit: " information
+            unit_of_measure = df.iat[0,-1] # Get the last column of the first row which may contain the "Unit: " information
             if isinstance(unit_of_measure, str) and "Unit：" in unit_of_measure: # If the "Unit: " measurement is provided
                 unit_of_measure = unit_of_measure.split("Unit：")[1].strip() # Extract the unit of measure
-                commodity_name = df.iloc[0,0] # Get the first column of the first row which may contain the commodity name
-                df.insert(0, "Commodity", f"{commodity_name} ({unit_of_measure})") #...Create a 'Commodity' column by extracting it from the first row's first column
-                #df.insert(1, "Unit", unit_of_measure) #...Create a 'Unit' column by extracting it from the first row's last column
+                commodity_name = df.iat[0,0] # Get the first column of the first row which may contain the commodity name
+                df.insert(0, "Commodity", commodity_name) #...Create a 'Commodity' column by extracting it from the first row's first column
+                df.insert(1, "Unit", unit_of_measure) #...Create a 'Unit' column by extracting it from the first row's last column
                 df.drop(df.index[0], inplace=True) # Drop the first row which is now redundant after extracting the 'Unit' and 'Commodity' info.
                 df.replace("--", pd.NA, inplace=True) #...Replace any occurrence of "--" with NaN
             
             # Convert columns that contain numeric data stored as strings to numeric types
-            df = df.apply(lambda col: pd.to_numeric(col, errors='coerce') if col.dropna().astype(str).str.fullmatch(r"-?\d+(\.\d+)?").all() else col)
+            #df = df.apply(lambda col: pd.to_numeric(col, errors='coerce') if col.dropna().astype(str).str.fullmatch(r"-?\d+(\.\d+)?").all() else col)
+            for column in df.columns:
+                if df[column].dropna().astype(str).str.fullmatch(r"-?\d+(\.\d+)?").all(): # If all non-null values in the column are numeric
+                    df[column] = pd.to_numeric(df[column], errors='coerce') # Convert the column to a numeric type, coercing any non-convertible values to NaN
             
-            if df.shape[1] > 1: # If the DataFrame has more than one column...
-                df_stocks = pd.concat([df_stocks, df], ignore_index=True) # Concatenate the cleaned DataFrame to the main 'DF'
-            
-        os.makedirs("stocks", exist_ok=True) # If doesn't exist, create the "stocks" directory
+            if 'Unit : (WGHTUNIT)' not in df.columns:
+                cleaned_dfs.append(df) if df.shape[1] > 1 else notes.append(df) # 
+            else:
+                df.to_csv(f"stocks/{date.strftime('%Y.%m')} SHFE amount of expiring standard warrants.csv", index=False)
+                logging.info("Amount of expiring standard warrants data fetched and saved for %s: %d rows", date.strftime('%d-%m-%Y'), len(df))
+
+        df_stocks = pd.concat(cleaned_dfs, ignore_index=True)
         df_stocks.to_csv(f"stocks/{date.strftime('%Y.%m.%d')} SHFE stocks.csv", index=False)
+        notes[0].to_csv(f"stocks/{date.strftime('%Y.%m.%d')} SHFE stocks.csv", mode='a', header=False, index=False)
         logging.info("SHFE stocks data fetched and saved for %s: %d rows", date.strftime('%d-%m-%Y'), len(df_stocks))
         return df_stocks
 
