@@ -91,14 +91,20 @@ def fetch_stocks_data(date): # Fetch stocks for a give date and deliver a DataFr
                     df[column] = pd.to_numeric(df[column], errors='coerce') # Convert the column to a numeric type, coercing any non-convertible values to NaN
             
             if 'Unit : (WGHTUNIT)' not in df.columns:
-                cleaned_dfs.append(df) if df.shape[1] > 1 else notes.append(df) # 
+                cleaned_dfs.append(df) if df.shape[1] > 1 else notes.append(df)
             else:
-                df.to_csv(f"stocks/{date.strftime('%Y.%m')} SHFE amount of expiring standard warrants.csv", index=False)
+                note = notes[-1].to_string(index=False, header=False).strip()
+                note = "\n".join(f'"# {line}"' for line in note.splitlines())
+                with open(f"stocks/{date.strftime('%Y.%m.%d')} SHFE amount of expiring standard warrants.csv", 'w', newline='', encoding='utf-8-sig') as f:
+                    f.write(note + "\n\n")
+                    df.to_csv(f, index=False)
                 logging.info("Amount of expiring standard warrants data fetched and saved for %s: %d rows", date.strftime('%d-%m-%Y'), len(df))
 
         df_stocks = pd.concat(cleaned_dfs, ignore_index=True)
-        df_stocks.to_csv(f"stocks/{date.strftime('%Y.%m.%d')} SHFE stocks.csv", index=False)
-        notes[0].to_csv(f"stocks/{date.strftime('%Y.%m.%d')} SHFE stocks.csv", mode='a', header=False, index=False)
+        note = "\n".join(f'"# {df.to_string(index=False, header=False).strip()}"' for df in notes[0:2])
+        with open(f"stocks/{date.strftime('%Y.%m.%d')} SHFE stocks.csv", 'w', newline='', encoding='utf-8-sig') as f:
+            f.write(note + "\n\n")
+            df_stocks.to_csv(f, index=False)
         logging.info("SHFE stocks data fetched and saved for %s: %d rows", date.strftime('%d-%m-%Y'), len(df_stocks))
         return df_stocks
 
