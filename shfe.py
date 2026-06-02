@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 os.makedirs("stocks", exist_ok=True)                    # If doesn't exist, create the "stocks" directory
 os.makedirs("prices", exist_ok=True)                    # If doesn't exist, create the "prices" directory
-trading_days = pd.bdate_range(start='2026-01-01', end='2026-06-02')
+trading_days = pd.bdate_range(start='2026-05-01', end='2026-06-02')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 request_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
 thread_local = threading.local()                        # Create a 'thread-local' object to hold data specific to each thread.
@@ -31,10 +31,10 @@ def get_session() -> requests.Session:                  # Get a session object a
         thread_local.session = session                  # Assign the 'session' object to 'thread_local'
     return thread_local.session 
 
-def fetch_prices_data(date) -> pd.DataFrame:            # Fetch prices for a give date and deliver a DataFrame
+def fetch_prices_data(date) -> pd.DataFrame:            # Fetch prices for a given date and deliver a DataFrame
     url = f"https://www.shfe.cn/data/tradedata/future/dailydata/kx{date.strftime('%Y%m%d')}.dat"
     try: 
-        response = get_session().get(url)
+        response = get_session().get(url, timeout=10)
         if response.status_code == 404:
             logging.info("Price data not available for %s [404]", date.strftime('%d-%m-%Y'))
             return pd.DataFrame()
@@ -48,6 +48,12 @@ def fetch_prices_data(date) -> pd.DataFrame:            # Fetch prices for a giv
         df.drop(columns=["group"], inplace=True)                        # Drop the temporary 'group' column
         df.reset_index(drop=True, inplace=True)                         # Reset the index of the DataFrame
         
+        # Data transformation for better memory usage and performance, but it's larger for storage (i.e. saves 1.0 instead of 1)
+        #df.replace(r"^\s*$", pd.NA, regex=True, inplace=True)           # Replace empty strings with NaN
+        #df = df.apply(pd.to_numeric, errors='ignore')                   # Convert columns that contain numeric data stored as strings to numeric types
+        #df = df.convert_dtypes()                                        # Convert columns to the best possible dtypes (e.g. Int64, Float64, string)
+        #df['PRODUCTID'] = df['PRODUCTID'].astype('category')            # Convert 'PRODUCTID' to categorical type for better performance and memory usage
+
         df.insert(0, "M", df.groupby("PRODUCTGROUPID").cumcount() + 1)  # Create 'M' column with cumulative count of rows within each group
         subtotal_rows = df.groupby("PRODUCTGROUPID").tail(1).index      # Get the index of the last row of each group
         df.loc[subtotal_rows, "M"] = 0                                  # Set 'M' value to 0 for subtotal rows
@@ -68,7 +74,7 @@ def fetch_prices_data(date) -> pd.DataFrame:            # Fetch prices for a giv
         logging.error("Error processing price data for %s [%s]", date.strftime('%d-%m-%Y'), processing_error)
         return pd.DataFrame({"Price_Error": [str(processing_error)]})
 
-def fetch_stocks_data(date) -> pd.DataFrame:                # Fetch stocks for a give date and deliver a DataFrame
+def fetch_stocks_data(date) -> pd.DataFrame:                # Fetch stocks for a given date and deliver a DataFrame
     url = f"https://www.shfe.cn/data/tradedata/future/stockdata/weeklystock_{date.strftime('%Y%m%d')}/EN/all.html"
     try:
         response = get_session().get(url, timeout=10)
@@ -119,13 +125,13 @@ def fetch_stocks_data(date) -> pd.DataFrame:                # Fetch stocks for a
                 if df[col].dropna().astype(str).str.fullmatch(r"-?\d+(\.\d+)?").all():  # If all values are numeric
                     df[col] = pd.to_numeric(df[col], errors='coerce')
             
-            # If 'Change' column exists, insert sufix from the previous column i.e. "Change (Last Week)"
+            # If 'Change' column exists, insert suffix from the previous column i.e. "Change (Last Week)"
             if "Change" in columns:
                 i = columns.index("Change")
                 df.columns.values[i] = f"Change {columns[i-1][columns[i-1].find('('):columns[i-1].find(')')+1]}"            
 
-            # Append the df to 'cleaned_dfs' if it doesn't contain the especial "Expiring Warrants" table
-            # 'Unit : (WGHTUNIT)' identifyes the "Expiring Warrants" table, which is saved separately with metadata
+            # Append the df to 'cleaned_dfs' if it doesn't contain the special "Expiring Warrants" table
+            # 'Unit : (WGHTUNIT)' identifies the "Expiring Warrants" table, which is saved separately with metadata
             if 'Unit : (WGHTUNIT)' not in columns:
                 cleaned_dfs.append(df) if df.shape[1] > 1 else notes.append(df)
             else:
