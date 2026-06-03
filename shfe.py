@@ -68,7 +68,8 @@ def fetch_prices_data(date) -> pd.DataFrame:            # Fetch prices for a giv
             f.write(f'"# Total {data["o_trade_day"]} Trading Days" \n\n')
             df.to_csv(f, index=False)
         logging.info("SHFE prices data fetched and saved for %s: %d rows", date, len(df))
-        return df
+        df_prices = df
+        return df_prices
     
     except requests.RequestException as network_error:
         logging.error("Network error for %s [%s]", date, network_error)
@@ -160,15 +161,16 @@ def fetch_stocks_data(date) -> pd.DataFrame:            # Fetch stocks for a giv
         logging.error("Error processing stocks data for %s [%s]", date, processing_error)
         return pd.DataFrame({"Stock_Error": [str(processing_error)]})
 
-def fetch_shfe_data(date):
-    fetch_prices_data(date)
-    fetch_stocks_data(date)
+def get_shfe_data(date) -> tuple[pd.DataFrame, pd.DataFrame]:
+    prices_data = fetch_prices_data(date)
+    stocks_data = fetch_stocks_data(date)
+    return prices_data, stocks_data
 
 def main():
     start_time = time.time()
     logging.info("Starting data fetch for %d trading days.", len(trading_days))
     with ThreadPoolExecutor(max_workers=10) as executor: # Create a pool with 10 worker threads
-        futures = [executor.submit(fetch_shfe_data, date) for date in trading_days] # 'futures' object store the threads and start them.
+        futures = [executor.submit(get_shfe_data, date) for date in trading_days] # 'futures' object store the threads and start them.
         for future in as_completed(futures):
             future.result()  # Show the result of each thread once completed.
     logging.info("Data fetch completed in %.2f seconds. JL 2026", time.time() - start_time)
