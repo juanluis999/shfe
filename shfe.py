@@ -169,10 +169,14 @@ def get_shfe_data(date) -> tuple[pd.DataFrame, pd.DataFrame]:
 def main():
     start_time = time.time()
     logging.info("Starting data fetch for %d trading days.", len(trading_days))
-    with ThreadPoolExecutor(max_workers=10) as executor: # Create a pool with 10 worker threads
-        futures = [executor.submit(get_shfe_data, date) for date in trading_days] # 'futures' object store the threads and start them.
+    with ThreadPoolExecutor(max_workers=10) as executor:    # Create a pool with 10 worker threads
+        futures = {                                         # 'futures' object stores the threads and start them.
+            executor.submit(get_shfe_data, date) : date
+            for date in trading_days
+        }                                                   # {Future1:date1, Future2:date2, ...}
         for future in as_completed(futures):
-            future.result()  # Show the result of each thread once completed.
+            date = futures[future]
+            print(date, future.result())                    # Show the result of each thread once completed.
     logging.info("Data fetch completed in %.2f seconds. JL 2026", time.time() - start_time)
 if __name__ == "__main__":
     main()
