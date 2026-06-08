@@ -11,10 +11,56 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 os.makedirs("stocks", exist_ok=True)                    # If doesn't exist, create the "stocks" directory
 os.makedirs("prices", exist_ok=True)                    # If doesn't exist, create the "prices" directory
-trading_days = pd.bdate_range(start='2026-05-01', end='2026-06-03')
+
+symbol = input("Commodity Symbol (e.g. cu): ").strip().lower()
+start_date = input("Start date (YYY-MM-DD): ").strip()
+end_date = input("End date (YYY-MM-DD): ").strip()
+
+trading_days = pd.bdate_range(start = start_date, end = end_date)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 request_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
 thread_local = threading.local()                        # Create a 'thread-local' object to hold data specific to each thread.
+renames= {"Grade" : "Crude",
+    "Theoretical Available Capacity (Last week)": "Storage Capacity (Last week)",
+    "Theoretical Available Capacity (This Week)": "Storage Capacity (This Week)",
+    "Theoretical Available Capacity (Change)": "Storage Capacity (Change)",
+    "Storage of last week": "Previous Week (Delivery-able)",
+    "Storage of this week": "This Week (Delivery-able)",
+    "Storage Change": "Change (Delivery-able)",
+    "Storage of last week (Delivery-able)": "Previous Week (Delivery-able)",
+    "Storage of last week (On Warrant)": "Previous Week (On Warrant)",
+    "Storage of this week (Delivery-able)": "This Week (Delivery-able)",
+    "Storage of this week (On Warrant)": "This Week (On Warrant)",
+    "Storage Change (Delivery-able)": "Change (Delivery-able)",
+    "Storage Change (On Warrant)": "Change (On Warrant)",
+    "Factory Warehouse" : "Warehouse",
+    "Depot" : "Warehouse",
+    "Factory Depot" : "Warehouse"}
+commodity_list = {'cu': 'COPPER',
+    'al': 'ALUMINUM',
+    'zn': 'ZINC',
+    'pb': 'LEAD',
+    'ni': 'NICKEL',
+    'sn': 'TIN',
+    'ao': 'Aluminlum Oxide',
+    'ad': 'Casting Aluminium Alloy',
+    'ru': 'NATURAL RUBBER',
+    'br': 'Butadiene Rubber',
+    'sp': 'Pulp',
+    'op': 'OFFSET PAPER',
+    'fu': 'FUEL OIL',
+    'bu': 'BITUMEN',
+    'au': 'GOLD',
+    'ag': 'SILVER',
+    'rb': 'Rebar',
+    'wr': 'WIRE ROD',
+    'hc': 'HOT ROLLED COILS',
+    'ss': 'Stainless Steel',
+    'sc': 'Medium Sour Crude Oil',
+    'lu': 'LSFO',
+    'nr': 'TSR 20',
+    'bc': 'COPPER(BC)'}
+commodity = commodity_list[symbol]
 
 def get_session() -> requests.Session:                  # Get a session object attached only to the current thread
     if not hasattr(thread_local, "session"):            # If "thread_local" doesn't yet have a 'session' object
@@ -49,27 +95,27 @@ def fetch_prices_data(date) -> pd.DataFrame:            # Fetch prices for a giv
         df.drop(columns=["group"], inplace=True)                                # Drop the temporary 'group' column
         df.reset_index(drop=True, inplace=True)                                 # Reset the index of the DataFrame
         
-        # # Data transformation for better memory usage and performance, but it's larger for storage (i.e. saves 1.0 instead of 1)
-        # df.replace(r"^\s*$", pd.NA, regex=True, inplace=True)           # Replace empty strings with NaN
-        # for col in df.columns:
-        #     try: df[col] = pd.to_numeric(df[col])                       # Try to convert columns to numeric type
-        #     except: pass
-        # df = df.convert_dtypes()                                        # Convert columns to the best possible dtypes (e.g. Int64, Float64, string)
-        # df['PRODUCTID'] = df['PRODUCTID'].astype('category')            # Convert 'PRODUCTID' to categorical type for better performance and memory usage
-        
         df.insert(0, "M", df.groupby("PRODUCTGROUPID").cumcount() + 1)  # Create 'M' column with cumulative count of rows within each group
         subtotal_rows = df.groupby("PRODUCTGROUPID").tail(1).index      # Get the index of the last row of each group
         df.loc[subtotal_rows, "M"] = 0                                  # Set 'M' value to 0 for subtotal rows
 
+        df_prices = df
+
+        # metadata = [data['report_date], data["o_year_num"], data["o_total_num"], data["o_trade_day"]]
         with open(f"prices/{date} SHFE prices.csv", 'w', newline='', encoding='utf-8-sig') as f:
             f.write(f'"# Date: {pd.to_datetime(data["report_date"]).strftime("%Y-%m-%d")}" \n')
             f.write(f'"# Issue No.({data["o_year_num"]}), {data["o_year"]}" \n')
             f.write(f'"# Total {data["o_total_num"]} Issues" \n')
             f.write(f'"# Total {data["o_trade_day"]} Trading Days" \n\n')
-            df.to_csv(f, index=False)
+            df_prices.to_csv(f, index=False)
         logging.info("SHFE prices data fetched and saved for %s: %d rows", date, len(df))
-        df_prices = df
-        return df_prices
+        
+        df_price = df_prices.query("M in [1, 3] and PRODUCTGROUPID == @symbol")
+        df_price = df_price.pivot(index='PRODUCTID', columns='M', values=['PRESETTLEMENTPRICE', 'SETTLEMENTPRICE'])
+        df_price.reset_index(drop=True, inplace=True)
+        df_price.columns = df_price.columns.to_flat_index()
+
+        return df_price
     
     except requests.RequestException as network_error:
         logging.error("Network error for %s [%s]", date, network_error)
@@ -95,22 +141,7 @@ def fetch_stocks_data(date) -> pd.DataFrame:            # Fetch stocks for a giv
             # Flatten the df columns if they are MultiIndex, then rename columns that match the Dictionary
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = [col[0] if col[0] == col [1] else f"{col[0]} ({col[1]})" for col in df.columns]
-            renames= {"Grade" : "Crude",
-                "Theoretical Available Capacity (Last week)": "Storage Capacity (Last week)",
-                "Theoretical Available Capacity (This Week)": "Storage Capacity (This Week)",
-                "Theoretical Available Capacity (Change)": "Storage Capacity (Change)",
-                "Storage of last week": "Previous Week (Delivery-able)",
-                "Storage of this week": "This Week (Delivery-able)",
-                "Storage Change": "Change (Delivery-able)",
-                "Storage of last week (Delivery-able)": "Previous Week (Delivery-able)",
-                "Storage of last week (On Warrant)": "Previous Week (On Warrant)",
-                "Storage of this week (Delivery-able)": "This Week (Delivery-able)",
-                "Storage of this week (On Warrant)": "This Week (On Warrant)",
-                "Storage Change (Delivery-able)": "Change (Delivery-able)",
-                "Storage Change (On Warrant)": "Change (On Warrant)",
-                "Factory Warehouse" : "Warehouse",
-                "Depot" : "Warehouse",
-                "Factory Depot" : "Warehouse"}
+
             df.rename(columns=renames, inplace=True)
             
             # Create 'Commodity' and 'Unit of Measure' columns by extracting them from the first row, if provided
@@ -124,10 +155,7 @@ def fetch_stocks_data(date) -> pd.DataFrame:            # Fetch stocks for a giv
                 df.replace("--", pd.NA, inplace=True)                           # Replace any occurrence of "--" with NaN
             
             columns = df.columns.to_list()
-            # for col in columns:
-            #     try: df[col] = pd.to_numeric(df[col])                         # Try to convert columns to numeric type
-            #     except: pass
-            
+
             # If 'Change' column exists, insert suffix from the previous column -> "Change (Last Week)"
             if "Change" in columns:
                 i = columns.index("Change")
@@ -137,22 +165,26 @@ def fetch_stocks_data(date) -> pd.DataFrame:            # Fetch stocks for a giv
             # 'Unit : (WGHTUNIT)' identifies the "Expiring Warrants" table, which is saved separately
             if 'Unit : (WGHTUNIT)' not in columns:
                 cleaned_dfs.append(df) if df.shape[1] > 1 else notes.append(df)
-            else:                                                               # Else, save the special "Expiring Warrants" table
-                note = notes[-1].to_string(index=False, header=False).strip()   # Its 'note' is stored in the las entry of 'notes'
-                note = "\n".join(f'"# {line}"' for line in note.splitlines())   # Prepend '#' to every line in 'note'
+            else:                                                                       # Else, save the special "Expiring Warrants" table
+                metadata = notes[-1].to_string(index=False, header=False).strip()       # Its 'note' is stored in the las entry of 'notes'
+                metadata = "\n".join(f'"# {line}"' for line in metadata.splitlines())   # Prepend '#' to every line in 'note'
                 with open(f"stocks/{date} Expiring standard warrants.csv", 'w', newline='', encoding='utf-8-sig') as f:
-                    f.write(note + "\n\n")
+                    f.write(metadata + "\n\n")
                     df.to_csv(f, index=False)
                 logging.info("Expiring standard warrants saved for %s: %d rows", date, len(df))
 
         # Concatenate all cleaned_dfs into a single DataFrame and save it to a CSV file with notes as metadata
         df_stocks = pd.concat(cleaned_dfs, ignore_index=True)
-        note = "\n".join(f'"# {df.to_string(index=False, header=False).strip()}"' for df in notes[0:2])
+        metadata = "\n".join(f'"# {df.to_string(index=False, header=False).strip()}"' for df in notes[0:2])
         with open(f"stocks/{date} SHFE stocks.csv", 'w', newline='', encoding='utf-8-sig') as f:
-            f.write(note + "\n\n")
+            f.write(metadata + "\n\n")
             df_stocks.to_csv(f, index=False)
         logging.info("SHFE stocks data fetched and saved for %s: %d rows", date, len(df_stocks))
-        return df_stocks
+
+        df_stock = df_stocks.query("Commodity == @commodity and Region == 'Total'")
+        df_stock = df_stock.iloc[[0],4:8]
+        df_stock.reset_index(drop=True, inplace=True)
+        return df_stock
 
     except requests.RequestException as network_error:
         logging.error("Network error for %s [%s]", date, network_error)
@@ -161,14 +193,16 @@ def fetch_stocks_data(date) -> pd.DataFrame:            # Fetch stocks for a giv
         logging.error("Error processing stocks data for %s [%s]", date, processing_error)
         return pd.DataFrame({"Stock_Error": [str(processing_error)]})
 
-def get_shfe_data(date) -> tuple[pd.DataFrame, pd.DataFrame]:
-    prices_data = fetch_prices_data(date)
-    stocks_data = fetch_stocks_data(date)
-    return prices_data, stocks_data
+def get_shfe_data(date) -> pd.DataFrame:
+    df_daily = pd.concat([fetch_prices_data(date), fetch_stocks_data(date)], axis=1)
+    df_daily.insert(0, 'Date', date)
+    return df_daily
 
 def main():
     start_time = time.time()
     logging.info("Starting data fetch for %d trading days.", len(trading_days))
+    
+    results = []
     with ThreadPoolExecutor(max_workers=10) as executor:    # Create a pool with 10 worker threads
         futures = {                                         # 'futures' object stores the threads and start them.
             executor.submit(get_shfe_data, date) : date
@@ -176,7 +210,9 @@ def main():
         }                                                   # {Future1:date1, Future2:date2, ...}
         for future in as_completed(futures):
             date = futures[future]
-            print(date, future.result())                    # Show the result of each thread once completed.
+            results.append(future.result())                 # The future result is appended to the results list
+
+    pd.concat(results).sort_values('Date').to_csv('test.csv', index=False)
     logging.info("Data fetch completed in %.2f seconds. JL 2026", time.time() - start_time)
 if __name__ == "__main__":
     main()
