@@ -41,15 +41,28 @@ symbol = input("Commodity Symbol (e.g. Cu): ").strip().lower()
 while symbol not in commodity_list.keys():
     print(f'Valid symbols: {[s for s in commodity_list.keys()]}')
     symbol = input("Commodity Symbol (e.g. Cu): ").strip().lower()
-start_date = input("Start date (YYYY-MM-DD): ").strip()
-end_date = input("End date (YYYY-MM-DD): ").strip()
-
 commodity = commodity_list[symbol]
-business_days = pd.bdate_range(start=start_date, end=end_date)
-workers = min(10, len(business_days))                   # Number of thread workers
+
+while True:
+    start_date = input("Start date (YYYY-MM-DD): ").strip()
+    end_date = input("End date (YYYY-MM-DD): ").strip()
+    try:
+        start_date = pd.to_datetime(start_date, format="%Y-%m-%d")
+        end_date = pd.to_datetime(end_date, format="%Y-%m-%d")
+        if end_date < start_date:
+            print("Error: End_date must be on or after the Start_date. Try it again!")
+            continue
+        business_days = pd.bdate_range(start=start_date, end=end_date)
+        if business_days.empty:
+            print("Error: The selected range contains no business days. Try it again!")
+            continue
+        break
+    except:
+        print("Error: Invalid date format. Please use YYYY-MM-DD. Try it again!")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 request_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+workers = min(10, len(business_days))                   # Number of thread workers
 thread_local = threading.local()                        # Create a 'thread-local' object to hold data specific to each thread.
 
 def get_session() -> requests.Session:                  # Get a session object attached only to the current thread
@@ -92,10 +105,10 @@ def fetch_prices_data(date) -> pd.DataFrame:                                    
 
         metadata = [pd.Timestamp(data['report_date']), data['o_year_num'], data["o_year"], data['o_total_num'], data['o_trade_day']]
         with open(f"prices/{date} SHFE prices.csv", 'w', newline='', encoding='utf-8-sig') as f:
-            f.write(f'"# Date: {metadata[0].strftime("%Y-%m-%d")}" \n\
-                    "# Issue No.({metadata[1]}), {metadata[2]}" \n\
-                    "# Total {metadata[3]} Issues" \n\
-                    "# Total {metadata[4]} Trading Days" \n\n')
+            f.write(f'"# Date: {metadata[0].strftime("%Y-%m-%d")}"\n'
+                    f'"# Issue No.({metadata[1]}), {metadata[2]}"\n'
+                    f'"# Total {metadata[3]} Issues"\n'
+                    f'"# Total {metadata[4]} Trading Days"\n\n')
             df_prices.to_csv(f, index=False)
         logging.info("SHFE prices data fetched and saved for %s: %d rows", date, len(df))
         
